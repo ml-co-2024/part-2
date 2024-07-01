@@ -1,0 +1,29 @@
+[tool.poetry]
+name = "constraints-in-ml"
+version = "0.1.0"
+description = ""
+authors = ["Michele Lombardi <michele.lombardi2@unibo.it>"]
+readme = "README.md"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.11"
+notebook = "^6"
+pandas = "^2.2.2"
+scikit-learn = "^1.5.0"
+matplotlib = "^3.9.0"
+ortools = "^9"
+pydot = "^2.0.0"
+rise = "^5.7.1"
+tensorflow = "^2.16.1"
+tensorflow-probability = "^0.24.0"
+tensorflow-lattice = "^2.1.0"
+osqp = "^0.6.7"
+scikit-multilearn = "^0.2.0"
+liac-arff = "^2.5.0"
+xgboost = "^2.1.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
