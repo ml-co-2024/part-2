@@ -22,6 +22,9 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 import osqp
 from scipy.sparse import csc_matrix
+from sklearn.metrics import accuracy_score
+import igraph as ig
+import tensorflow_lattice as tfl
 
 
 def load_multilabel_dataset(fname,
@@ -66,9 +69,17 @@ def get_forbidden_pairs(y, cutoff_quantile=0):
     return forbidden
 
 
+def plot_forbidden_pairs(nclasses, forbidden, figsize=None):
+    g = ig.Graph(n=nclasses, edges=forbidden)
+    layout = g.layout("kamada_kawai")
+    g.vs['color'] = 'bisque'
+    fig, ax = plt.subplots(figsize=figsize)
+    ig.plot(g, layout=layout, target=ax)
+
+
 def project_multilabel_classification(p,
                                       forbidden,
-                                      solver='CBC',
+                                      solver='SAT',
                                       tlim=10):
     # Extend p into a two-dimensional structure
     if len(p.shape) == 1:
@@ -307,25 +318,54 @@ class RCNablaLayer(keras.layers.Layer):
         # Store the reference values/scales
         self.tau_ref = tau_ref
         self.vs_ref = vs_ref
+        # Store configuration parameters
+        self.fixed_tau = fixed_tau
+        self.fixed_vs = fixed_vs
+        # # Prepare an initializer
+        # p_init = tf.random_normal_initializer()
+        # # Init the tau parameter
+        # if fixed_tau is None:
+        #     self.logtau = tf.Variable(
+        #         initial_value=p_init(shape=(1, ), dtype="float32"),
+        #         trainable=True,
+        #     )
+        # else:
+        #     val = np.log(fixed_tau / self.tau_ref, dtype='float32')
+        #     self.logtau = tf.Variable(initial_value=val, trainable=False)
+        # # Init the vs parameter
+        # if fixed_vs is None:
+        #     self.logvs = tf.Variable(
+        #         initial_value=p_init(shape=(1, ), dtype="float32"),
+        #         trainable=True,
+        #     )
+        # else:
+        #     val = np.log(fixed_vs / self.vs_ref, dtype='float32')
+        #     self.logvs = tf.Variable(initial_value=val, trainable=False)
+
+    def build(self, input_shape):
         # Prepare an initializer
-        p_init = tf.random_normal_initializer()
+        # p_init = tf.random_normal_initializer()
         # Init the tau parameter
-        if fixed_tau is None:
-            self.logtau = tf.Variable(
-                initial_value=p_init(shape=(1, ), dtype="float32"),
-                trainable=True,
+        if self.fixed_tau is None:
+            self.logtau = self.add_weight(
+                    shape=(1, ),
+                    initializer = 'random_normal',
+                    trainable=True,
+                    # dtype='float32'
             )
         else:
-            val = np.log(fixed_tau / self.tau_ref, dtype='float32')
+            val = np.log(self.fixed_tau / self.tau_ref, dtype='float32')
             self.logtau = tf.Variable(initial_value=val, trainable=False)
         # Init the vs parameter
-        if fixed_vs is None:
-            self.logvs = tf.Variable(
-                initial_value=p_init(shape=(1, ), dtype="float32"),
-                trainable=True,
+        if self.fixed_vs is None:
+            self.logvs = self.add_weight(
+                    shape=(1, ),
+                    initializer = 'random_normal',
+                    trainable=True,
+                    # dtype='float32'
             )
         else:
-            val = np.log(fixed_vs / self.vs_ref, dtype='float32')
+            val = np.log(self.fixed_vs / self.vs_ref, dtype='float32')
             self.logvs = tf.Variable(initial_value=val, trainable=False)
 
     def get_tau(self):
@@ -428,10 +468,12 @@ class ODEEulerModel(keras.Model):
             else:
                 y = self.call([y0, T], training=True)
             # Compute the loss
-            mask = ~tf.math.is_nan(yt)
+            mask = ~keras.ops.isnan(yt)
+            # mask = ~tf.math.is_nan(yt)
             # residuals = y[mask] - yt[mask]
             # loss = tf.math.reduce_mean(tf.math.square(residuals))
-            loss = self.compiled_loss(yt[mask], y[mask])
+            # loss = self.compiled_loss(yt[mask], y[mask])
+            loss = self.compute_loss(x=None, y=yt[mask], y_pred=y[mask])
         # Compute gradients
         trainable_vars = self.trainable_variables
         gradients = tape.gradient(loss, trainable_vars)
@@ -440,7 +482,9 @@ class ODEEulerModel(keras.Model):
         # # Update main metrics
         # self.metric_loss.update_state(loss)
         # Update compiled metrics
-        self.compiled_metrics.update_state(yt[mask], y[mask])
+        for metric in self.metrics:
+            metric.update_state(yt[mask], y[mask])
+        # self.compiled_metrics.update_state(yt[mask], y[mask])
         # Return a dict mapping metric names to current value
         return {m.name: m.result() for m in self.metrics}
 
@@ -456,10 +500,14 @@ class ODEEulerModel(keras.Model):
         else:
             y = self.call([y0, T], training=False)
         # Updates the metrics tracking the loss
-        mask = ~tf.math.is_nan(yt)
-        self.compiled_loss(yt[mask], y[mask])
+        # mask = ~tf.math.is_nan(yt)
+        mask = ~keras.ops.isnan(yt)
+        # self.compiled_loss(yt[mask], y[mask])
+        self.compute_loss(x=None, y=yt[mask], y_pred=y[mask])
         # Update the metrics
-        self.compiled_metrics.update_state(yt[mask], y[mask])
+        for metric in self.metrics:
+            metric.update_state(yt[mask], y[mask])
+        # self.compiled_metrics.update_state(yt[mask], y[mask])
         # Return a dict mapping metric names to current value.
         # Note that it will include the loss (tracked in self.metrics).
         return {m.name: m.result() for m in self.metrics}
@@ -617,8 +665,7 @@ def train_ml_model(model, X, y, epochs=20,
         sample_weight=None,
         eager_execution=False, loss='mse'):
     # Compile the model
-    model.compile(optimizer='Adam', loss=loss,
-            run_eagerly=eager_execution)
+    model.compile(optimizer='Adam', loss=loss, run_eagerly=eager_execution)
     # Build the early stop callback
     cb = []
     if validation_split > 0 or validation_data is not None:
@@ -1724,9 +1771,9 @@ def load_cmapss_data(data_folder):
 #     return res
 
 
-def plot_ml_model(model):
-    return keras.utils.plot_model(model, show_shapes=True,
-            show_layer_names=True, rankdir='LR')
+def plot_ml_model(model, rankdir='LR', show_shapes=True, show_layer_names=True, **args):
+    return keras.utils.plot_model(model, show_shapes=show_shapes,
+            show_layer_names=show_layer_names, rankdir=rankdir, **args)
 
 
 # ==============================================================================
@@ -2072,7 +2119,8 @@ class CstDIDIModel(keras.Model):
 
         with tf.GradientTape() as tape:
             y_pred = self.base_pred(x, training=True)
-            mse = self.compiled_loss(y_true, y_pred)
+            # mse = self.compiled_loss(y_true, y_pred)
+            mse = self.compute_loss(x, y_true, y_pred)
             # Compute the constraint regularization term
             ymean = tf.math.reduce_mean(y_pred)
             didi = 0
@@ -2113,6 +2161,8 @@ class LagDualDIDIModel(keras.Model):
         # Weight and threshold
         self.alpha = tf.Variable(0., name='alpha')
         self.thr = thr
+        # Dual multiplier optimizer
+        self.dual_optimizer = keras.optimizers.Adam()
         # Translate attribute names to indices
         self.protected = {list(attributes).index(k): dom for k, dom in protected.items()}
         # Loss trackers
@@ -2120,13 +2170,18 @@ class LagDualDIDIModel(keras.Model):
         self.mse_tracker = keras.metrics.Mean(name='mse')
         self.cst_tracker = keras.metrics.Mean(name='cst')
 
+    def compile(self, *pargs, **nargs):
+        super().compile(*pargs, **nargs)
+        self.dual_optimizer.build([self.alpha])
+
     def call(self, data):
         return self.base_pred(data)
 
     def __custom_loss(self, x, y_true, sign=1):
         y_pred = self.base_pred(x, training=True)
         # loss, mse, cst = self.__custom_loss(x, y_true, y_pred)
-        mse = self.compiled_loss(y_true, y_pred)
+        # mse = self.compiled_loss(y_true, y_pred)
+        mse = self.compute_loss(x, y_true, y_pred)
         # Compute the constraint regularization term
         ymean = tf.math.reduce_mean(y_pred)
         didi = 0
@@ -2146,21 +2201,21 @@ class LagDualDIDIModel(keras.Model):
 
         # Separate training variables
         tr_vars = self.trainable_variables
-        wgt_vars = tr_vars[:-1]
-        mul_vars = tr_vars[-1:]
 
         # Update the network weights
-        grads = tape.gradient(loss, wgt_vars)
-        self.optimizer.apply_gradients(zip(grads, wgt_vars))
+        grads = tape.gradient(loss, tr_vars)
+        self.optimizer.apply_gradients(zip(grads, tr_vars))
 
         with tf.GradientTape() as tape:
             loss, mse, cst = self.__custom_loss(x, y_true, sign=-1)
 
-        grads = tape.gradient(loss, mul_vars)
-        self.optimizer.apply_gradients(zip(grads, mul_vars))
+        grads = tape.gradient(loss, self.alpha)
+
+        # self.optimizer.apply_gradients(zip([grads], [self.alpha]))
+        self.dual_optimizer.apply_gradients(zip([grads], [self.alpha]))
 
         # Track the loss change
-        self.ls_tracker.update_state(loss)
+        self.ls_tracker.update_state(-loss)
         self.mse_tracker.update_state(mse)
         self.cst_tracker.update_state(cst)
         return {'loss': self.ls_tracker.result(),
@@ -2322,7 +2377,6 @@ def mt_balance_master(y_true,
     if rho != 0:
         for i in range(ns):
             for j in range(nc):
-                # loss_t += 1/nc * (y_true[i, j] * (1 - z[i, j]) + (1 - y_true[i, j]) * z[i, j])
                 loss_t += y_true[i, j] * (1 - z[i, j])
 
     # Add the currrent-prediction loss
@@ -2331,7 +2385,7 @@ def mt_balance_master(y_true,
         # Compute negative logs
         y_pred_cnl = -np.log(np.maximum(y_pred, eps))
         # Compute the scaling factor
-        scale = np.max(y_pred_cnl)
+        scale = -np.log(eps)
         scaled_pred_cnl = y_pred_cnl / scale
         for i in range(ns):
             for j in range(nc):
@@ -2560,11 +2614,11 @@ def mt_balance(X, y, learner, bal_thr, max_iter=1, rho=1,
 
 def mtx_function_plot(xm, ym, f_true=None, f_pred=None, figsize=None):
     fig = plt.figure(figsize=figsize)
-    plt.scatter(xm, ym, color='tab:red', label='measures')
+    plt.scatter(xm, ym, color='tab:red', label='training data')
     span = xm[1] - xm[0]
     x = np.linspace(xm[0] - 0.5*span, xm[1] + 0.5*span)
     if f_true is not None:
-        plt.plot(x, f_true(x), linestyle=':', color='tab:blue', label='true function')
+        plt.plot(x, f_true(x), linestyle=':', color='tab:blue', label='ground truth')
     if f_pred is not None:
         plt.plot(x, f_pred(x), color='tab:orange', label='estimated function', linestyle=':')
         plt.scatter(xm, f_pred(xm), color='tab:orange', label='predictions')
@@ -2574,7 +2628,7 @@ def mtx_function_plot(xm, ym, f_true=None, f_pred=None, figsize=None):
     plt.axis('equal')
     plt.legend()
 
-    
+
 def mtx_output_plot(xm, ym, yp, f_bound=None, yf=None, plot_bias=False,
         figsize=None, ylim=None):
     fig = plt.figure(figsize=figsize)
@@ -2584,7 +2638,7 @@ def mtx_output_plot(xm, ym, yp, f_bound=None, yf=None, plot_bias=False,
     plt.axvspan(y0[0], y0[-1], color='white')
     if plot_bias:
         plt.plot(y0, y1, color='tab:orange', label='ML model bias')
-    plt.scatter(ym[0], ym[1], color='tab:red', label='measured values', zorder=2)
+    plt.scatter(ym[0], ym[1], color='tab:red', label='training data', zorder=2)
     if yp is not None:
         yp = np.array(yp).reshape(-1, 2)
         plt.scatter(yp[:, 0], yp[:, 1], color='tab:orange', label='predictions', zorder=2)
@@ -2615,14 +2669,15 @@ def mtx_learner_step(xm, ym):
     return lambda x: x**a_opt
 
 
-def mtx_master_step_alpha(ym, yp, alpha=0.1):
+def mtx_master_step_alpha(ym, yp, rho=1):
     cst = LinearConstraint([[1.5, -1]], 0, np.inf)
-    obj = lambda y: alpha*2*np.dot((yp - ym), (y - yp)) + np.square(y - yp).sum()
+    # obj = lambda y: rho*2*np.dot((yp - ym), (y - yp)) + np.square(y - yp).sum()
+    obj = lambda y: np.square(y - ym).sum() + 1/rho * np.square(y - yp).sum()
     res = minimize(obj, yp, constraints=[cst])
     return res.x
 
 
-def mtx_moving_target_alpha(xm, ym, n, alpha=0.1):
+def mtx_moving_target_rho(xm, ym, n, rho=1):
     ypl = []
     yfl = []
 
@@ -2631,7 +2686,8 @@ def mtx_moving_target_alpha(xm, ym, n, alpha=0.1):
     ypl.append(yp)
     for i in range(n):
         # Master step
-        yf = mtx_master_step_alpha(ym, yp, alpha=alpha/(i+1))
+        # yf = mtx_master_step_alpha(ym, yp, rho=rho*(i+1))
+        yf = mtx_master_step_alpha(ym, yp, rho=rho)
         yfl.append(yf)
         # Learner stpe
         f_pred = mtx_learner_step(xm, yf)
@@ -2639,3 +2695,165 @@ def mtx_moving_target_alpha(xm, ym, n, alpha=0.1):
         ypl.append(yp)
     return ypl, yfl, f_pred
 
+
+def get_multi_label_accuracy(y_true, y_pred, series_name=None):
+    data = [accuracy_score(y_true.values[:, c], y_pred[:, c])
+            for c in range(y_true.shape[1])]
+    res = pd.Series(data=data, name=series_name)
+    return res
+
+
+def forbidden_pair_violation(y, forbidden, normalize=True):
+    labels = []
+    violations = []
+    y = y.astype('bool')
+    for (h, k) in sorted(forbidden):
+        labels.append(f'{h},{k}')
+        violations.append((y[:, h] & y[:, k]).sum())
+    res = pd.Series(index=labels, data=violations)
+    if normalize:
+        res /= len(y)
+    return res
+
+
+def load_restaurant_data():
+    def sample_restaurants(n):
+        avg_ratings = np.random.uniform(1.0, 5.0, n)
+        num_reviews = np.round(np.exp(np.random.uniform(0.0, np.log(200), n)))
+        dollar_ratings = np.random.choice(["D", "DD", "DDD", "DDDD"], n)
+        ctr_labels = click_through_rate(avg_ratings, num_reviews, dollar_ratings)
+        return avg_ratings, num_reviews, dollar_ratings, ctr_labels
+
+
+    def sample_dataset(n, testing_set):
+        (avg_ratings, num_reviews, dollar_ratings, ctr_labels) = sample_restaurants(n)
+        if testing_set:
+            # Testing has a more uniform distribution over all restaurants.
+            num_views = np.random.poisson(lam=3, size=n)
+        else:
+            # Training/validation datasets have more views on popular restaurants.
+            num_views = np.random.poisson(lam=ctr_labels * num_reviews / 40.0, size=n)
+
+        return pd.DataFrame({
+                "avg_rating": np.repeat(avg_ratings, num_views),
+                "num_reviews": np.repeat(num_reviews, num_views),
+                "dollar_rating": np.repeat(dollar_ratings, num_views),
+                "clicked": np.random.binomial(n=1, p=np.repeat(ctr_labels, num_views))
+            })
+
+    # Generate
+    np.random.seed(42)
+    data_train = sample_dataset(2000, testing_set=False)
+    data_val = sample_dataset(1000, testing_set=False)
+    data_test = sample_dataset(1000, testing_set=True)
+    return data_train, data_val, data_test
+
+
+def click_through_rate(avg_ratings, num_reviews, dollar_ratings):
+    dollar_rating_baseline = {"D": 3, "DD": 2, "DDD": 4, "DDDD": 4.5}
+    return 1 / (1 + np.exp(
+        np.array([dollar_rating_baseline[d] for d in dollar_ratings]) -
+        avg_ratings * np.log1p(num_reviews) / 4))
+
+
+def plot_ctr_truth(figsize=None):
+    plt.figure(figsize=figsize)
+    res = 100
+    nticks = 3
+    avgr = np.repeat(np.linspace(0, 5, res), res)
+    nrev = np.tile(np.linspace(0, 200, res), res)
+    avgr_ticks = np.linspace(0, 5, nticks)
+    nrev_ticks = np.linspace(0, 200, nticks)
+    rticks = np.linspace(0, res, nticks)
+    for i, drating in enumerate(['D', 'DD', 'DDD', 'DDDD']):
+        drt = [drating] * (res*res)
+        ctr = click_through_rate(avgr, nrev, drt)
+        plt.subplot(1, 4, i+1)
+        plt.pcolor(ctr.reshape((res, res)), vmin=0, vmax=1)
+        plt.xlabel('average rating')
+        if i == 0:
+            plt.ylabel('num. reviews')
+        plt.title(drating)
+        plt.xticks(rticks, avgr_ticks, fontsize=7)
+        if i == 0:
+            plt.yticks(rticks, nrev_ticks, fontsize=7)
+        else:
+            plt.yticks([], [])
+    plt.tight_layout()
+
+
+def plot_ctr_distribution(data, figsize=None):
+    plt.figure(figsize=figsize)
+    nbins = 15
+    plt.subplot(131)
+    plt.hist(data['avg_rating'], density=True, bins=nbins)
+    plt.xlabel('average rating')
+    plt.subplot(132)
+    plt.hist(data['num_reviews'], density=True, bins=nbins)
+    plt.xlabel('num. reviews')
+    plt.subplot(133)
+    vcnt = data['dollar_rating'].value_counts()
+    vcnt /= vcnt.sum()
+    plt.bar([0.5, 1.5, 2.5, 3.5],
+            [vcnt['D'], vcnt['DD'], vcnt['DDD'], vcnt['DDDD']])
+    plt.xlabel('dollar rating')
+    plt.tight_layout()
+
+
+def plot_ctr_estimation(estimator, scale,
+        split_input=False, one_hot_categorical=True,
+        figsize=None):
+    plt.figure(figsize=figsize)
+    res = 100
+    nticks = 3
+    avgr = np.repeat(np.linspace(0, 5, res), res).reshape(-1, 1)
+    avgr = avgr / scale['avg_rating']
+    nrev = np.tile(np.linspace(0, 200, res), res).reshape(-1, 1)
+    nrev = nrev / scale['num_reviews']
+    avgr_ticks = np.linspace(0, 5, nticks)
+    nrev_ticks = np.linspace(0, 200, nticks)
+    rticks = np.linspace(0, res, nticks)
+    for i, drating in enumerate(['D', 'DD', 'DDD', 'DDDD']):
+        if one_hot_categorical:
+            # Categorical encoding for the dollar rating
+            dr_cat = np.zeros((1, 4))
+            dr_cat[0, i] = 1
+            dr_cat = np.repeat((dr_cat), res*res, axis=0)
+            # Concatenate all inputs
+            x = np.hstack((avgr, nrev, dr_cat))
+        else:
+            # Integer encoding for the categorical attribute
+            dr_cat = np.full((res*res, 1), i)
+            x = np.hstack((avgr, nrev, dr_cat))
+        # Split input, if requested
+        if split_input:
+            x = [x[:, i].reshape(-1, 1) for i in range(x.shape[1])]
+        # Obtain the predictions
+        ctr = estimator.predict(x, verbose=0)
+        plt.subplot(1, 4, i+1)
+        plt.pcolor(ctr.reshape((res, res)), vmin=0, vmax=1)
+        plt.xlabel('average rating')
+        if i == 0:
+            plt.ylabel('num. reviews')
+        plt.title(drating)
+        plt.xticks(rticks, avgr_ticks, fontsize=7)
+        if i == 0:
+            plt.yticks(rticks, nrev_ticks, fontsize=7)
+        else:
+            plt.yticks([], [])
+    plt.tight_layout()
+
+
+class LatticeWrapper(keras.Layer):
+    def __init__(self, *args, **nargs):
+        super(LatticeWrapper, self).__init__()
+        self._tflayer = tfl.layers.Lattice(*args, **nargs)
+
+    def build(self, input_shape):
+        self._tflayer.build(input_shape)
+    #
+    # def compute_output_shape(self, input_shape):
+    #     return self._tflayer.compute_output_shape(input_shape)
+
+    def call(self, x):
+        return self._tflayer(x)
