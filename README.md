@@ -12,7 +12,7 @@ Students are strongly encouraged to _run all lectures locally_. Doing this will 
 
 * Clone the repository with the tutorial, in this case via the command:
 ```sh
-git clone https://github.com/ml-co-2024/part-1.git
+git clone https://github.com/ml-co-2024/part-2.git
 ```
 * Installing a compatible version of the Python interpreter and all the required dependencies, possibly via a virtual environment
   - The best way to do this is by installing [pyenv](https://github.com/pyenv/pyenv) and [poetry](https://python-poetry.org)
